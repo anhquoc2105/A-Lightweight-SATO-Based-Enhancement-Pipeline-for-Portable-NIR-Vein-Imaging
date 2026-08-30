@@ -205,7 +205,7 @@ def process_image(image_path):
     edge_preserved_image = preserve_edges(contrast_image)
 
     resized_nir = cv2.resize(edge_preserved_image, (300, 300))
-    vein_mask = phan_doan_lan_can(resized_nir, ksize=2)
+    vein_mask = phan_doan_lan_can(resized_nir, ksize=3)
     vein_mask = cv2.resize(vein_mask, (500, 500))
     vein_mask = clean_vein_mask(vein_mask)
     vein_mask = resize_mask_to_image(vein_mask, segmented_image)

@@ -177,6 +177,16 @@ def keep_inner_veins(vein_mask, inner_hand_mask):
     return vein_mask.astype(np.uint8) * 255
 
 
+def clear_bottom_border(vein_mask, border_rows=3):
+    if border_rows < 0:
+        raise ValueError("border_rows must be greater than or equal to 0")
+
+    result = vein_mask.copy()
+    if border_rows > 0:
+        result[-min(border_rows, result.shape[0]) :, :] = 0
+    return result
+
+
 def create_vein_overlay(hand_image, vein_mask):
     red_layer = np.zeros_like(hand_image)
     red_layer[vein_mask == 255] = [0, 0, 255]
@@ -195,12 +205,13 @@ def process_image(image_path):
     edge_preserved_image = preserve_edges(contrast_image)
 
     resized_nir = cv2.resize(edge_preserved_image, (300, 300))
-    vein_mask = phan_doan_lan_can(resized_nir, ksize=2)
+    vein_mask = phan_doan_lan_can(resized_nir, ksize=3)
     vein_mask = cv2.resize(vein_mask, (500, 500))
     vein_mask = clean_vein_mask(vein_mask)
     vein_mask = resize_mask_to_image(vein_mask, segmented_image)
     inner_hand_mask = resize_mask_to_image(inner_hand_mask, segmented_image)
     vein_mask = keep_inner_veins(vein_mask, inner_hand_mask)
+    vein_mask = clear_bottom_border(vein_mask)
     overlay_image = create_vein_overlay(segmented_image, vein_mask)
 
     return {

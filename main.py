@@ -11,7 +11,9 @@ from skimage.filters import sato
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_IMAGE_PATH = BASE_DIR / "image" / "1.png"
 DEFAULT_SCALE_PERCENT = 50
-GRABCUT_RECT_RATIO = (0.026, 0.058, 0.928, 0.942)
+BACKGROUND_THRESHOLD = 100
+BACKGROUND_CLOSE_SIZE = 15
+BACKGROUND_OPEN_SIZE = 5
 
 
 def parse_args():
@@ -41,38 +43,23 @@ def resize_image(image, scale_percent=DEFAULT_SCALE_PERCENT):
     return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
 
 
-def create_grabcut_rect(image_shape):
-    height, width = image_shape[:2]
-    x_ratio, y_ratio, width_ratio, height_ratio = GRABCUT_RECT_RATIO
-    rect = (
-        int(width * x_ratio),
-        int(height * y_ratio),
-        int(width * width_ratio),
-        int(height * height_ratio),
+def remove_background(image, threshold=BACKGROUND_THRESHOLD):
+    """Remove a dark background with a fixed threshold and morphology."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    _, hand_mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+    hand_mask = cv2.morphologyEx(
+        hand_mask,
+        cv2.MORPH_CLOSE,
+        np.ones((BACKGROUND_CLOSE_SIZE, BACKGROUND_CLOSE_SIZE), np.uint8),
     )
-    return clamp_rect(rect, image_shape)
-
-
-def clamp_rect(rect, image_shape):
-    image_height, image_width = image_shape[:2]
-    x, y, width, height = rect
-    x = min(max(x, 0), image_width - 2)
-    y = min(max(y, 0), image_height - 2)
-    max_width = image_width - x
-    max_height = image_height - y
-    return x, y, min(width, max_width), min(height, max_height)
-
-
-def segment_hand(image):
-    mask = np.zeros(image.shape[:2], np.uint8)
-    bgd_model = np.zeros((1, 65), np.float64)
-    fgd_model = np.zeros((1, 65), np.float64)
-    rect = create_grabcut_rect(image.shape)
-
-    cv2.grabCut(image, mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
-    hand_mask = np.where((mask == 2) | (mask == 0), 0, 1).astype("uint8")
-    segmented_image = image * hand_mask[:, :, np.newaxis]
-    return segmented_image, hand_mask
+    hand_mask = cv2.morphologyEx(
+        hand_mask,
+        cv2.MORPH_OPEN,
+        np.ones((BACKGROUND_OPEN_SIZE, BACKGROUND_OPEN_SIZE), np.uint8),
+    )
+    binary_mask = (hand_mask > 0).astype(np.uint8)
+    background_removed_image = image * binary_mask[:, :, np.newaxis]
+    return background_removed_image, binary_mask
 
 
 def create_inner_hand_mask(hand_mask):
@@ -119,19 +106,33 @@ def preserve_edges(image):
 
 
 def phan_doan_lan_can(image, ksize):
+    """Compute local thresholds in bulk, preserving the legacy pixel alignment."""
     rows, cols = image.shape
-    result = np.zeros((rows, cols), dtype=np.uint8)
     padding = (ksize - 1) // 2
     padded_image = np.pad(image, (padding, padding), mode="reflect")
-    mean_gray = np.mean(padded_image)
+    padded_float = padded_image.astype(np.float64)
+    integral = cv2.integral(padded_float)
+    integral_sq = cv2.integral(padded_float * padded_float)
+    y1 = np.arange(rows)
+    x1 = np.arange(cols)
+    # Clipping also preserves the original truncated windows for even ksize.
+    y2 = np.minimum(y1 + ksize, padded_image.shape[0])
+    x2 = np.minimum(x1 + ksize, padded_image.shape[1])
+    area = (y2 - y1)[:, None] * (x2 - x1)[None, :]
 
-    for row in range(rows):
-        for col in range(cols):
-            local_area = padded_image[row : row + ksize, col : col + ksize]
-            threshold = 20 * np.std(local_area) + mean_gray
-            result[row, col] = 255 if padded_image[row, col] > threshold else 0
-
-    return result
+    window_sum = (
+        integral[np.ix_(y2, x2)] - integral[np.ix_(y1, x2)]
+        - integral[np.ix_(y2, x1)] + integral[np.ix_(y1, x1)]
+    )
+    window_sum_sq = (
+        integral_sq[np.ix_(y2, x2)] - integral_sq[np.ix_(y1, x2)]
+        - integral_sq[np.ix_(y2, x1)] + integral_sq[np.ix_(y1, x1)]
+    )
+    local_mean = window_sum / area
+    variance = np.maximum(window_sum_sq / area - local_mean * local_mean, 0)
+    threshold = 20 * np.sqrt(variance) + np.mean(padded_image)
+    # Keep the legacy top-left comparison; centering it would change the masks.
+    return np.where(padded_image[:rows, :cols] > threshold, 255, 0).astype(np.uint8)
 
 
 def clean_vein_mask(segmented_mask):
@@ -171,7 +172,7 @@ def keep_inner_veins(vein_mask, inner_hand_mask):
     )
     vein_mask = morphology.remove_small_objects(
         vein_mask.astype(bool),
-        max_size=39,
+        min_size=40,
         connectivity=2,
     )
     return vein_mask.astype(np.uint8) * 255
@@ -196,10 +197,10 @@ def create_vein_overlay(hand_image, vein_mask):
 def process_image(image_path):
     original_image = read_image(image_path)
     resized_image = resize_image(original_image)
-    segmented_image, hand_mask = segment_hand(resized_image)
+    background_removed_image, hand_mask = remove_background(resized_image)
     inner_hand_mask = create_inner_hand_mask(hand_mask)
 
-    gray_image, enhanced_gray = enhance_grayscale(segmented_image)
+    gray_image, enhanced_gray = enhance_grayscale(background_removed_image)
     sato_image = apply_sato_filter(enhanced_gray)
     contrast_image = enhance_contrast(sato_image)
     edge_preserved_image = preserve_edges(contrast_image)
@@ -208,15 +209,16 @@ def process_image(image_path):
     vein_mask = phan_doan_lan_can(resized_nir, ksize=3)
     vein_mask = cv2.resize(vein_mask, (500, 500))
     vein_mask = clean_vein_mask(vein_mask)
-    vein_mask = resize_mask_to_image(vein_mask, segmented_image)
-    inner_hand_mask = resize_mask_to_image(inner_hand_mask, segmented_image)
+    vein_mask = resize_mask_to_image(vein_mask, background_removed_image)
+    inner_hand_mask = resize_mask_to_image(inner_hand_mask, background_removed_image)
     vein_mask = keep_inner_veins(vein_mask, inner_hand_mask)
     vein_mask = clear_bottom_border(vein_mask)
-    overlay_image = create_vein_overlay(segmented_image, vein_mask)
+    clahe_bgr = cv2.cvtColor(enhanced_gray, cv2.COLOR_GRAY2BGR)
+    overlay_image = create_vein_overlay(clahe_bgr, vein_mask)
 
     return {
         "resized_image": resized_image,
-        "segmented_image": segmented_image,
+        "background_removed_image": background_removed_image,
         "gray_image": gray_image,
         "enhanced_gray": enhanced_gray,
         "sato_image": sato_image,
@@ -244,7 +246,7 @@ def show_bgr(image, title, position):
 def show_results(results):
     plt.figure()
     show_bgr(results["resized_image"], "Raw Image", 331)
-    show_bgr(results["segmented_image"], "GrabCut Segmentation", 332)
+    show_bgr(results["background_removed_image"], "Background Remove", 332)
     show_gray(results["gray_image"], "Grayscale", 333)
     show_gray(results["enhanced_gray"], "CLAHE", 334)
     show_gray(results["sato_image"], "SATO", 335)

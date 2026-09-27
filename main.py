@@ -44,8 +44,8 @@ def resize_image(image, scale_percent=DEFAULT_SCALE_PERCENT):
 
 
 def remove_background(image, threshold=BACKGROUND_THRESHOLD):
-    """Remove a dark background with a fixed threshold and morphology."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    """Mask grayscale input; also accept BGR for existing helper callers."""
+    gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, hand_mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
     hand_mask = cv2.morphologyEx(
         hand_mask,
@@ -58,7 +58,9 @@ def remove_background(image, threshold=BACKGROUND_THRESHOLD):
         np.ones((BACKGROUND_OPEN_SIZE, BACKGROUND_OPEN_SIZE), np.uint8),
     )
     binary_mask = (hand_mask > 0).astype(np.uint8)
-    background_removed_image = image * binary_mask[:, :, np.newaxis]
+    background_removed_image = image * (
+        binary_mask if image.ndim == 2 else binary_mask[:, :, np.newaxis]
+    )
     return background_removed_image, binary_mask
 
 
@@ -70,8 +72,8 @@ def create_inner_hand_mask(hand_mask):
     return inner_mask
 
 
-def enhance_grayscale(image):
-    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+def enhance_grayscale(gray_image):
+    """Apply first-stage CLAHE to an already grayscale, background-masked image."""
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced_gray = clahe.apply(gray_image)
     return gray_image, enhanced_gray
@@ -197,10 +199,13 @@ def create_vein_overlay(hand_image, vein_mask):
 def process_image(image_path):
     original_image = read_image(image_path)
     resized_image = resize_image(original_image)
-    background_removed_image, hand_mask = remove_background(resized_image)
+    raw_gray_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+    gray_image, hand_mask = remove_background(raw_gray_image)
+    # Preserve the BGR diagnostic output used by existing batch scripts.
+    background_removed_image = resized_image * hand_mask[:, :, np.newaxis]
     inner_hand_mask = create_inner_hand_mask(hand_mask)
 
-    gray_image, enhanced_gray = enhance_grayscale(background_removed_image)
+    gray_image, enhanced_gray = enhance_grayscale(gray_image)
     sato_image = apply_sato_filter(enhanced_gray)
     contrast_image = enhance_contrast(sato_image)
     edge_preserved_image = preserve_edges(contrast_image)
@@ -218,6 +223,7 @@ def process_image(image_path):
 
     return {
         "resized_image": resized_image,
+        "raw_gray_image": raw_gray_image,
         "background_removed_image": background_removed_image,
         "gray_image": gray_image,
         "enhanced_gray": enhanced_gray,
@@ -246,14 +252,14 @@ def show_bgr(image, title, position):
 def show_results(results):
     plt.figure()
     show_bgr(results["resized_image"], "Raw Image", 331)
-    show_bgr(results["background_removed_image"], "Background Remove", 332)
-    show_gray(results["gray_image"], "Grayscale", 333)
-    show_gray(results["enhanced_gray"], "CLAHE", 334)
+    show_gray(results["raw_gray_image"], "Grayscale", 332)
+    show_gray(results["gray_image"], "Background Removal", 333)
+    show_gray(results["enhanced_gray"], "CLAHE 1", 334)
     show_gray(results["sato_image"], "SATO", 335)
-    show_gray(results["contrast_image"], "Contrast Enhancement", 336)
+    show_gray(results["contrast_image"], "CLAHE 2", 336)
     show_gray(results["edge_preserved_image"], "Edge-Preserving", 337)
     show_gray(results["vein_mask"], "Clean Vein Mask", 338)
-    show_bgr(results["overlay_image"], "Matching Image", 339)
+    show_bgr(results["overlay_image"], "Vein Overlay", 339)
     plt.tight_layout()
     plt.show()
 
